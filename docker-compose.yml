@@ -8,13 +8,14 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Browser-facing, so this is the address as seen from the HOST,
-        # not the internal service name.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        # The browser talks to THIS app's BFF proxy, never to the API
+        # directly, so this is the web origin as seen from the host.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000}
     ports:
       - "3000:3000"
     environment:
-      # Server-side calls stay on the compose network.
+      # Server-side calls stay on the compose network. No /api/v1 suffix —
+      # the API client appends the version prefix itself.
       API_URL: ${API_URL:-http://api:4000}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required — see .env.example}
       NODE_ENV: production
