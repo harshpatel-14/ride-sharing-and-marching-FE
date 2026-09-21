@@ -1,4 +1,11 @@
-export { api, request, type RequestOptions } from './client'
+export {
+  api,
+  request,
+  requestWithStatus,
+  type RequestOptions,
+  type HttpMethod,
+  type ResponseWithStatus,
+} from './client'
 export { endpoints, BFF_PROXY_BASE, API_VERSION_PREFIX } from './endpoints'
 export {
   ApiError,

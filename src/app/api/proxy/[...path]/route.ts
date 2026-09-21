@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server'
-import { ensureAccessToken, callApi, clearTokens } from '@/features/auth/server'
+import { ensureAccessToken, callApiWithStatus, clearTokens } from '@/features/auth/server'
 import { errorResponse } from '@/lib/api/bff'
 import { isTokenExpired } from '@/lib/api'
 
@@ -49,19 +49,24 @@ async function handle(request: NextRequest, context: { params: Promise<{ path: s
       return unauth
     }
 
-    let data: unknown
+    let result: { data: unknown; status: number }
     try {
-      data = await callApi(method, apiPath, { accessToken, body, query })
+      result = await callApiWithStatus(method, apiPath, { accessToken, body, query })
     } catch (error) {
       // The token expired between our check and the call. Refresh once, retry once.
       if (!isTokenExpired(error)) throw error
 
       const retried = await ensureAccessToken(cookieCarrier.cookies)
       if (!retried) throw error
-      data = await callApi(method, apiPath, { accessToken: retried, body, query })
+      result = await callApiWithStatus(method, apiPath, { accessToken: retried, body, query })
     }
 
-    const response = NextResponse.json(data ?? {})
+    // Relay the upstream status: a 201 that arrives as a 200 misrepresents
+    // what the API did, even if no caller currently branches on it.
+    const response =
+      result.status === 204
+        ? new NextResponse(null, { status: 204 })
+        : NextResponse.json(result.data ?? {}, { status: result.status })
     copyCookies(cookieCarrier, response)
     return response
   } catch (error) {

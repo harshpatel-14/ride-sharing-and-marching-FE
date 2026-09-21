@@ -69,11 +69,27 @@ async function toApiError(response: Response, fallbackRequestId: string): Promis
   })
 }
 
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
+
+/** Body plus the upstream status, for callers that must preserve it (the BFF proxy). */
+export interface ResponseWithStatus<T> {
+  data: T
+  status: number
+}
+
 export async function request<T>(
-  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+  method: HttpMethod,
   path: string,
   init: { body?: unknown; options?: RequestOptions | undefined } = {},
 ): Promise<T> {
+  return (await requestWithStatus<T>(method, path, init)).data
+}
+
+export async function requestWithStatus<T>(
+  method: HttpMethod,
+  path: string,
+  init: { body?: unknown; options?: RequestOptions | undefined } = {},
+): Promise<ResponseWithStatus<T>> {
   const { body, options = {} } = init
   const baseUrl = options.baseUrl ?? ''
 
@@ -124,8 +140,8 @@ export async function request<T>(
 
   logger.debug('api.ok', { method, path, requestId, status: response.status, durationMs })
 
-  if (response.status === 204) return undefined as T
-  return (await response.json()) as T
+  if (response.status === 204) return { data: undefined as T, status: 204 }
+  return { data: (await response.json()) as T, status: response.status }
 }
 
 /** Browser-side client. Talks to the BFF proxy, never to Express directly. */

@@ -2,7 +2,16 @@ import 'server-only'
 import { cache } from 'react'
 import { redirect } from 'next/navigation'
 import type { ResponseCookies } from 'next/dist/server/web/spec-extension/cookies'
-import { API_VERSION_PREFIX, endpoints, isTokenExpired, isUnauthenticated, request } from '@/lib/api'
+import {
+  API_VERSION_PREFIX,
+  endpoints,
+  isTokenExpired,
+  isUnauthenticated,
+  request,
+  requestWithStatus,
+  type HttpMethod,
+  type ResponseWithStatus,
+} from '@/lib/api'
 import { env } from '@/lib/env'
 import { logger } from '@/lib/logger'
 import { authResultSchema, meResponseSchema, tokensSchema, type AuthResult, type Tokens, type User } from '../schemas'
@@ -214,13 +223,29 @@ export async function logout(refreshToken: string): Promise<void> {
   }
 }
 
-/** Authenticated passthrough for the BFF proxy. */
+/** Authenticated passthrough. */
 export async function callApi<T>(
-  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+  method: HttpMethod,
   path: string,
   init: { body?: unknown; accessToken: string; query?: Record<string, string> },
 ): Promise<T> {
   return request<T>(method, path, {
+    ...(init.body !== undefined ? { body: init.body } : {}),
+    options: { ...authed(init.accessToken), ...(init.query ? { query: init.query } : {}) },
+  })
+}
+
+/**
+ * As callApi, but keeps the upstream status so the proxy can relay it
+ * verbatim. A proxy that turns every 201 into a 200 is lying about what the
+ * API did, even if no current caller notices.
+ */
+export async function callApiWithStatus<T>(
+  method: HttpMethod,
+  path: string,
+  init: { body?: unknown; accessToken: string; query?: Record<string, string> },
+): Promise<ResponseWithStatus<T>> {
+  return requestWithStatus<T>(method, path, {
     ...(init.body !== undefined ? { body: init.body } : {}),
     options: { ...authed(init.accessToken), ...(init.query ? { query: init.query } : {}) },
   })

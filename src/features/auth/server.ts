@@ -12,6 +12,7 @@ export {
   ensureAccessToken,
   shouldRefresh,
   callApi,
+  callApiWithStatus,
   __resetRefreshState,
 } from './api/auth.server'
 
