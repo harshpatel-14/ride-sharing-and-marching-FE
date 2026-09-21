@@ -1,104 +1,156 @@
-import type { Session } from '@/features/auth'
-import type { Ride, RideStatus } from '@/features/rides'
-import type { Booking, BookingWithRide, BookingStatus } from '@/features/bookings'
+import type { User } from '@/features/auth'
+import type { Driver, Ride, RideStatus } from '@/features/rides'
+import type { Booking, BookingStatus } from '@/features/bookings'
 import type { SearchResult } from '@/features/search'
-import type { CostSplit } from '@/features/cost'
 
 /**
- * Test data factories.
+ * Fixtures shaped from the real payloads in docs/API.md.
  *
  * Each factory's return type is the Zod-inferred domain type, so the day a
- * schema gains a required field, every factory fails to compile. That is the
- * point: mocks that drift from the contract give you a green suite testing an
- * API that no longer exists. (§12)
+ * schema gains a required field every factory fails to compile. That is the
+ * point: mocks that drift from the contract give a green suite testing an API
+ * that no longer exists. (§12)
  */
 
-let seq = 0
-const id = (prefix: string) => `${prefix}-${String(++seq).padStart(8, '0')}-4000-8000-000000000000`
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString()
+
+export const IDS = {
+  driver: uuid(2),
+  rider: uuid(9),
+  ride: uuid(100),
+  completedRide: uuid(199),
+  booking: uuid(200),
+} as const
 
 export function resetFactories() {
-  seq = 0
+  /* Ids are deterministic, so there is no counter to reset. Kept as a hook
+     for when a factory needs sequencing. */
 }
 
-export function makeSession(overrides: Partial<Session> = {}): Session {
+export function makeUser(overrides: Partial<User> = {}): User {
   return {
-    userId: uuid(1),
-    name: 'Asha Rider',
+    id: IDS.driver,
     email: 'asha@example.com',
-    capabilities: ['drive', 'ride'],
+    fullName: 'Asha M. Mehta',
+    phone: '+91 98111 00001',
+    createdAt: iso(-86_400_000),
     ...overrides,
+  }
+}
+
+/** The public driver shape — no contact details. The default. */
+export function makePublicDriver(overrides: Partial<Driver> = {}): Driver {
+  return { id: IDS.driver, fullName: 'Asha M. Mehta', ...overrides }
+}
+
+/** Only ever returned to the driver themselves or a confirmed rider. (§9) */
+export function makeDriverWithContact(): Driver {
+  return {
+    id: IDS.driver,
+    fullName: 'Asha M. Mehta',
+    phone: '+91 98111 00001',
+    email: 'asha@example.com',
   }
 }
 
 export function makeRide(overrides: Partial<Ride> = {}): Ride {
-  const inTwoHours = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+  const departureAt = overrides.departureAt ?? iso(6 * 3_600_000)
+  const flexMinutes = overrides.flexMinutes ?? 30
+  const flexMs = flexMinutes * 60_000
+
   return {
-    id: uuid(100),
-    driverId: uuid(2),
-    driverName: 'Dev Driver',
-    origin: { id: 'p1', label: 'Iscon Cross Road, Ahmedabad', coords: { lat: 23.0225, lng: 72.5714 } },
-    destination: { id: 'p2', label: 'Vadodara Railway Station', coords: { lat: 22.3072, lng: 73.1812 } },
-    departureAt: inTwoHours,
-    seatsTotal: 4,
+    id: IDS.ride,
+    origin: { label: 'Prahlad Nagar', lat: 23.0103, lng: 72.5074 },
+    destination: { label: 'Vastrapur', lat: 23.0364, lng: 72.529 },
+    departureAt,
+    flexMinutes,
+    departureWindow: {
+      from: new Date(new Date(departureAt).getTime() - flexMs).toISOString(),
+      to: new Date(new Date(departureAt).getTime() + flexMs).toISOString(),
+    },
+    seatsTotal: 3,
+    seatsTaken: 0,
     seatsAvailable: 3,
+    estimatedCost: '300.00',
     status: 'OPEN' satisfies RideStatus,
-    estimatedCostMinor: 120_000,
-    currency: 'INR',
-    // Absent by default — contact appears only with a confirmed booking. (§9)
-    driverContact: null,
-    createdAt: new Date().toISOString(),
+    createdAt: iso(-3_600_000),
+    completedAt: null,
+    cancelledAt: null,
+    // Public by default: contact details are the exception, not the norm.
+    driver: makePublicDriver(),
+    isOwner: false,
     ...overrides,
   }
 }
 
-/** A ride with exactly one seat left — the setup for every last-seat test. */
+/** One seat left — the setup for every last-seat test. */
 export function makeLastSeatRide(overrides: Partial<Ride> = {}): Ride {
-  return makeRide({ seatsTotal: 4, seatsAvailable: 1, ...overrides })
+  return makeRide({ seatsTotal: 3, seatsTaken: 2, seatsAvailable: 1, ...overrides })
 }
 
 export function makeSearchResult(overrides: Partial<SearchResult> = {}): SearchResult {
-  const { driverContact: _omit, ...ride } = makeRide()
+  const ride = makeRide()
   return {
-    ...ride,
-    originDistanceKm: 1.2,
-    destinationDistanceKm: 2.4,
+    id: ride.id,
+    origin: ride.origin,
+    destination: ride.destination,
+    departureAt: ride.departureAt,
+    flexMinutes: ride.flexMinutes,
+    seatsTotal: ride.seatsTotal,
+    seatsAvailable: ride.seatsAvailable,
+    estimatedCost: '320.00',
+    // What this rider would pay if they joined — show this, not estimatedCost.
+    estimatedShare: '160.00',
+    status: 'OPEN',
+    driver: { id: IDS.driver, fullName: 'Asha M. Mehta' },
+    originMeters: 0,
+    destMeters: 0,
     ...overrides,
   }
 }
 
 export function makeBooking(overrides: Partial<Booking> = {}): Booking {
   return {
-    id: uuid(200),
-    rideId: uuid(100),
-    riderId: uuid(1),
-    riderName: 'Asha Rider',
-    seats: 1,
+    id: IDS.booking,
+    rideId: IDS.ride,
+    riderId: IDS.rider,
     status: 'CONFIRMED' satisfies BookingStatus,
-    contact: { name: 'Dev Driver', phone: '+91 90000 00000' },
-    shareMinor: 40_000,
-    currency: 'INR',
-    createdAt: new Date().toISOString(),
+    seatShare: '160.00',
+    amountOwed: '160.00',
+    createdAt: iso(-1_800_000),
     cancelledAt: null,
+    cancellationReason: null,
     ...overrides,
   }
 }
 
-export function makeBookingWithRide(overrides: Partial<BookingWithRide> = {}): BookingWithRide {
-  return { ...makeBooking(), ride: makeRide(), ...overrides }
-}
-
-export function makeCostSplit(overrides: Partial<CostSplit> = {}): CostSplit {
-  return {
-    rideId: uuid(100),
-    totalMinor: 120_000,
-    confirmedRiderCount: 3,
-    perRiderMinor: 40_000,
-    yourShareMinor: 40_000,
-    currency: 'INR',
-    recalculatedAt: new Date().toISOString(),
+/** A booking as it appears in /me/bookings — carrying its full ride. */
+export function makeBookingWithRide(overrides: Partial<Booking> = {}): Booking {
+  return makeBooking({
+    ride: makeRide({ driver: makeDriverWithContact(), seatsTaken: 1, seatsAvailable: 2 }),
     ...overrides,
-  }
+  })
 }
 
-export { id as makeId, uuid as makeUuid }
+/**
+ * The driver-cancelled case from docs/API.md: frozen seatShare, zero owed,
+ * a reason, and contact details withdrawn.
+ */
+export function makeDriverCancelledBooking(overrides: Partial<Booking> = {}): Booking {
+  return makeBooking({
+    status: 'CANCELLED_BY_DRIVER',
+    seatShare: '100.00',
+    amountOwed: '0.00',
+    cancelledAt: iso(-60_000),
+    cancellationReason: 'Car trouble',
+    ride: makeRide({
+      status: 'CANCELLED',
+      cancelledAt: iso(-60_000),
+      driver: makePublicDriver(),
+    }),
+    ...overrides,
+  })
+}
+
+export { uuid as makeUuid, iso as makeIso }

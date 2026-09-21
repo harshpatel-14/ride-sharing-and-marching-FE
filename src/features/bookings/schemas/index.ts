@@ -1,56 +1,61 @@
 import { z } from 'zod'
-import { contactSchema, rideSchema } from '@/features/rides'
+import { rideSchema } from '@/features/rides'
+import { decimalStringSchema } from '@/lib/utils'
 
 /**
- * Cancellation cause is part of the status, not a separate flag. (§10)
- *
- * CANCELLED_BY_DRIVER and CANCELLED_BY_RIDER are different events with
- * potentially different refund and reputation handling later; collapsing them
- * into one CANCELLED is a decision that is expensive to reverse.
+ * There is no PENDING state: a booking either claimed a seat or does not
+ * exist. The two cancellation states are kept distinct because they are
+ * different events with different consequences for the rider. (§10)
  */
 export const bookingStatusSchema = z.enum([
-  'PENDING',
   'CONFIRMED',
   'CANCELLED_BY_RIDER',
   'CANCELLED_BY_DRIVER',
-  'COMPLETED',
 ])
 export type BookingStatus = z.infer<typeof bookingStatusSchema>
+
+export const publicRiderSchema = z.object({ id: z.uuid(), fullName: z.string() })
+export const riderWithContactSchema = publicRiderSchema.extend({
+  phone: z.string(),
+  email: z.email(),
+})
+export type PublicRider = z.infer<typeof publicRiderSchema>
+export type RiderWithContact = z.infer<typeof riderWithContactSchema>
+export type Rider = PublicRider | RiderWithContact
+
+export const riderHasContact = (rider: Rider): rider is RiderWithContact => 'phone' in rider
 
 export const bookingSchema = z.object({
   id: z.uuid(),
   rideId: z.uuid(),
   riderId: z.uuid(),
-  riderName: z.string(),
-  seats: z.number().int().min(1),
   status: bookingStatusSchema,
   /**
-   * Present only while the booking is CONFIRMED. When a driver cancels the
-   * ride, the server stops returning this and the panel disappears on the next
-   * fetch — revocation needs no client-side cleanup because visibility was
-   * never client-owned. (§9, §10)
+   * This rider's share as of the last recalculation. It MOVES — and it goes
+   * UP when another rider cancels. Surfacing that is a product requirement:
+   * a silently increasing charge is what people dispute. (§11)
    */
-  contact: contactSchema.nullable(),
-  /** This rider's share, computed by the server. (§11) */
-  shareMinor: z.number().int().min(0),
-  currency: z.string().length(3).default('INR'),
+  seatShare: decimalStringSchema,
+  /** "0.00" once cancelled. seatShare is kept as the record of what was quoted. */
+  amountOwed: decimalStringSchema,
   createdAt: z.iso.datetime(),
   cancelledAt: z.iso.datetime().nullable(),
+  cancellationReason: z.string().nullable(),
+  ride: rideSchema.optional(),
+  rider: z.union([riderWithContactSchema, publicRiderSchema]).optional(),
 })
 export type Booking = z.infer<typeof bookingSchema>
 
-/** My-bookings list embeds the ride so the card can render without an N+1. */
-export const bookingWithRideSchema = bookingSchema.extend({ ride: rideSchema })
-export type BookingWithRide = z.infer<typeof bookingWithRideSchema>
-
-export const bookingListSchema = z.array(bookingWithRideSchema)
-
-export const bookSeatSchema = z.object({
-  seats: z.number().int().min(1).max(8).default(1),
+export const bookingResponseSchema = z.object({ booking: bookingSchema })
+export const bookingListResponseSchema = z.object({
+  bookings: z.array(bookingSchema),
+  nextCursor: z.string().nullable(),
 })
-export type BookSeatInput = z.input<typeof bookSeatSchema>
+export const rideManifestResponseSchema = z.object({ bookings: z.array(bookingSchema) })
+export const cancelBookingResponseSchema = z.object({
+  booking: bookingSchema,
+  seatsAvailable: z.number().int().min(0),
+})
 
-export const isBookingActive = (status: BookingStatus) =>
-  status === 'PENDING' || status === 'CONFIRMED'
-
+export const isBookingActive = (status: BookingStatus) => status === 'CONFIRMED'
 export const isCancelledByDriver = (status: BookingStatus) => status === 'CANCELLED_BY_DRIVER'

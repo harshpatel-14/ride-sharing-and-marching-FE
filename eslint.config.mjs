@@ -52,13 +52,16 @@ export default tseslint.config(
     rules: {
       'boundaries/dependencies': ['error', {
         default: 'disallow',
-        message: '{{from.type}} may not import {{to.type}} — see FRONTEND-ARCHITECTURE.md §3',
+        message:
+          '{{from.type}} may not import this ({{to.type}}) — check the layering table and the ' +
+          'feature entry-point rule in FRONTEND-ARCHITECTURE.md §2/§3',
         policies: [
+          // Layer hierarchy: each layer may reach only downwards.
           { from: { element: { type: 'app' } },
-            allow: { to: { element: { types: { anyOf: ['feature', 'shared-ui', 'lib', 'config', 'types'] } } } } },
+            allow: { to: { element: { types: { anyOf: ['shared-ui', 'lib', 'config', 'types'] } } } } },
 
           { from: { element: { type: 'feature' } },
-            allow: { to: { element: { types: { anyOf: ['feature', 'shared-ui', 'lib', 'config', 'types'] } } } } },
+            allow: { to: { element: { types: { anyOf: ['shared-ui', 'lib', 'config', 'types'] } } } } },
 
           { from: { element: { type: 'shared-ui' } },
             allow: { to: { element: { types: { anyOf: ['lib', 'config', 'types'] } } } } },
@@ -68,6 +71,16 @@ export default tseslint.config(
 
           { from: { element: { type: 'config' } },
             allow: { to: { element: { type: 'types' } } } },
+
+          // A feature is reachable ONLY through its entry points:
+          //   index.ts  — universal (safe in a Client Component)
+          //   server.ts — RSC-only (pulls next/headers and `server-only`)
+          // Anything deeper matches no policy and so falls to `default: disallow`.
+          // Same-feature relative imports are unaffected: the plugin does not
+          // check dependencies within a single element. This is what lets a
+          // feature's internals be restructured freely, forever. (§2)
+          { from: { element: { types: { anyOf: ['app', 'feature'] } } },
+            allow: { to: { element: { type: 'feature', internalPath: '@(index|server).ts' } } } },
 
           // Tests and mocks sit outside the hierarchy on purpose — they must
           // see every layer in order to mirror the contract faithfully.
@@ -81,13 +94,6 @@ export default tseslint.config(
           // A colocated test file may reach the shared fixtures and helpers.
           { from: { file: { categories: 'test' } },
             allow: { to: { element: { types: { anyOf: ['test', 'mocks'] } } } } },
-
-          // A feature's internals are private: cross-feature imports go through
-          // index.ts. Same-feature relative imports are unaffected (the plugin
-          // does not check dependencies within one element). This is what lets
-          // you restructure a feature freely, forever. (§2)
-          { disallow: { to: { element: { type: 'feature', internalPath: '!index.ts' } } },
-            message: "Import a feature from its root barrel (@/features/<name>), never its internals — see FRONTEND-ARCHITECTURE.md §2" },
         ],
       }],
     },

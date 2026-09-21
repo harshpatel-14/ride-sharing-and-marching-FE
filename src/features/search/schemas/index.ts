@@ -1,15 +1,16 @@
 import { z } from 'zod'
 import { SEARCH, RIDE } from '@/config/constants'
-import { rideSchema } from '@/features/rides'
+import { publicDriverSchema, placeSchema, rideStatusSchema } from '@/features/rides'
+import { decimalStringSchema } from '@/lib/utils'
 
 /**
  * Search query. (§7)
  *
- * This ONE schema does four jobs: validates the form, parses `searchParams` in
- * the RSC, serialises back to a query string, and types the API call. That is
- * what "one source of truth" actually buys.
+ * One schema does four jobs: validates the form, parses `searchParams` in the
+ * RSC, serialises back to a query string, and types the API call.
  *
- * `z.coerce` matters because URL params are always strings.
+ * `z.coerce` matters because URL params are always strings. Note the API
+ * speaks METRES, not kilometres.
  */
 export const searchQuerySchema = z
   .object({
@@ -18,48 +19,72 @@ export const searchQuerySchema = z
     destLat: z.coerce.number().min(-90).max(90),
     destLng: z.coerce.number().min(-180).max(180),
 
-    /** Time window. Proximity AND overlap together — never either alone. (spec §3.2) */
+    /** Proximity AND time overlap together — never either alone. (spec §3.2) */
     departAfter: z.iso.datetime(),
     departBefore: z.iso.datetime(),
 
-    radiusKm: z.coerce
+    radiusMeters: z.coerce
       .number()
-      .min(SEARCH.MIN_RADIUS_KM)
-      .max(SEARCH.MAX_RADIUS_KM)
-      .default(SEARCH.DEFAULT_RADIUS_KM),
+      .int()
+      .min(SEARCH.MIN_RADIUS_METERS)
+      .max(SEARCH.MAX_RADIUS_METERS)
+      .default(SEARCH.DEFAULT_RADIUS_METERS),
     seats: z.coerce.number().int().min(RIDE.MIN_SEATS).max(RIDE.MAX_SEATS).default(1),
-
-    /** Cursor, not offset: open rides change under you as people book. (§7) */
-    cursor: z.string().optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(SEARCH.PAGE_SIZE),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
   })
   .refine((v) => new Date(v.departAfter) < new Date(v.departBefore), {
     message: 'Time window must start before it ends',
     path: ['departBefore'],
   })
+  // The API rejects anything wider; catching it here saves a round trip.
+  .refine(
+    (v) =>
+      new Date(v.departBefore).getTime() - new Date(v.departAfter).getTime() <=
+      SEARCH.MAX_WINDOW_HOURS * 3_600_000,
+    {
+      message: `The time window may not exceed ${SEARCH.MAX_WINDOW_HOURS} hours`,
+      path: ['departBefore'],
+    },
+  )
 
 export type SearchQuery = z.infer<typeof searchQuerySchema>
 export type SearchQueryInput = z.input<typeof searchQuerySchema>
 
 /**
- * A search result is a ride WITHOUT contact details, plus server-computed
- * match metadata. `driverContact` is omitted at the type level: search happens
- * before any booking exists, so there is nothing to reveal. (§9)
+ * A search result is NOT a full ride. (§9, docs/API.md)
+ *
+ * `driver` is always the public shape — a search result is not a match, so
+ * there is never contact information to leak. It also carries server-computed
+ * match metadata and `estimatedShare`, which is what to display instead of
+ * `estimatedCost`.
  */
-export const searchResultSchema = rideSchema.omit({ driverContact: true }).extend({
-  /** Computed by the server's matching query — for labelling, not filtering. */
-  originDistanceKm: z.number().min(0),
-  destinationDistanceKm: z.number().min(0),
+export const searchResultSchema = z.object({
+  id: z.uuid(),
+  origin: placeSchema,
+  destination: placeSchema,
+  departureAt: z.iso.datetime(),
+  flexMinutes: z.number().int().min(0),
+  seatsTotal: z.number().int(),
+  seatsAvailable: z.number().int().min(0),
+  estimatedCost: decimalStringSchema,
+  /** What THIS rider would pay if they joined. Show this, not estimatedCost. */
+  estimatedShare: decimalStringSchema,
+  status: rideStatusSchema,
+  driver: publicDriverSchema,
+  /** Distance from the requested points — for labelling, never for filtering. */
+  originMeters: z.number().min(0),
+  destMeters: z.number().min(0),
 })
 export type SearchResult = z.infer<typeof searchResultSchema>
 
+/** Ranked top-N: there is no cursor. */
 export const searchResponseSchema = z.object({
-  results: z.array(searchResultSchema),
-  nextCursor: z.string().nullable(),
+  rides: z.array(searchResultSchema),
+  searchedAt: z.iso.datetime(),
 })
 export type SearchResponse = z.infer<typeof searchResponseSchema>
 
-/** Serialise a query back to URL params so a search is shareable. (§7) */
+/** Serialise back to URL params so a search is shareable. (§7) */
 export function toSearchParams(query: SearchQuery): URLSearchParams {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
@@ -68,7 +93,7 @@ export function toSearchParams(query: SearchQuery): URLSearchParams {
   return params
 }
 
-/** Parse `searchParams` in an RSC. Returns null when the URL has no valid search. */
+/** Parse `searchParams` in an RSC. */
 export function parseSearchParams(input: Record<string, string | string[] | undefined>) {
   const flat = Object.fromEntries(
     Object.entries(input).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]),

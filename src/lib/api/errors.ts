@@ -1,116 +1,206 @@
 /**
- * The error taxonomy from §6.2. Mapped once, here, so that every call site
- * agrees on what a 409 means.
+ * The error taxonomy, mapped to the backend contract in docs/API.md.
  *
- * The important one: 409 is a NORMAL, DESIGNED-FOR outcome of booking the last
- * seat — not a failure. Two riders tap Book, one gets 201, one gets 409. The
- * 409 rider must see a coherent recovery path, never "Something went wrong".
+ * Two rules from that contract shape everything here:
+ *
+ *  1. **Branch on `error.code`, never on `error.message`.** Messages are written
+ *     for humans and will be reworded.
+ *  2. **There is no 403.** Asking for someone else's record returns 404, so ids
+ *     cannot be probed for existence. The UI must not reintroduce the
+ *     distinction it was careful to remove.
+ *
+ * And the one that matters most: `409 NO_SEATS_AVAILABLE` is the *designed*
+ * outcome of losing the race for the last seat, not a failure. (spec §3.3)
  */
 
-/** Machine-readable codes the backend sends in the response body. */
 export type ApiErrorCode =
+  // validation / request shape
   | 'VALIDATION_FAILED'
+  | 'MALFORMED_REQUEST'
+  // auth
   | 'UNAUTHENTICATED'
+  | 'INVALID_CREDENTIALS'
+  | 'TOKEN_EXPIRED'
   | 'FORBIDDEN'
+  | 'NOT_RESOURCE_OWNER'
+  // absence
   | 'NOT_FOUND'
-  | 'SEAT_UNAVAILABLE'
-  | 'ALREADY_BOOKED'
+  | 'RIDE_NOT_FOUND'
+  | 'BOOKING_NOT_FOUND'
+  | 'USER_NOT_FOUND'
+  // state conflicts
+  | 'CONFLICT'
+  | 'NO_SEATS_AVAILABLE'
   | 'RIDE_NOT_OPEN'
-  | 'RIDE_COMPLETED'
-  | 'RIDE_CANCELLED'
+  | 'RIDE_COMPLETED_IMMUTABLE'
+  | 'ALREADY_BOOKED'
+  | 'EMAIL_ALREADY_REGISTERED'
+  // semantics
+  | 'UNPROCESSABLE'
+  | 'DEPARTURE_IN_PAST'
+  | 'CANNOT_BOOK_OWN_RIDE'
+  // infrastructure
   | 'RATE_LIMITED'
-  | 'INTERNAL'
+  | 'INTERNAL_ERROR'
+  | 'SERVICE_UNAVAILABLE'
+  // client-side only: never sent by the API
   | 'NETWORK'
   | 'TIMEOUT'
 
+/** `details[]` on a validation failure. `field` is a dotted path. */
 export interface FieldError {
-  path: string
+  source: 'body' | 'query' | 'params'
+  field: string
+  code: string
   message: string
 }
 
 export class ApiError extends Error {
   readonly status: number
   readonly code: ApiErrorCode
-  readonly fieldErrors: FieldError[]
-  /** Correlates this failure with the backend's structured trace. (§13) */
+  readonly details: FieldError[]
+  /** Also returned in `x-request-id`; it finds the server log line. */
   readonly requestId: string | undefined
 
   constructor(init: {
     status: number
     code: ApiErrorCode
     message: string
-    fieldErrors?: FieldError[]
+    details?: FieldError[]
     requestId?: string | undefined
   }) {
     super(init.message)
     this.name = 'ApiError'
     this.status = init.status
     this.code = init.code
-    this.fieldErrors = init.fieldErrors ?? []
+    this.details = init.details ?? []
     this.requestId = init.requestId
   }
 }
 
 export const isApiError = (e: unknown): e is ApiError => e instanceof ApiError
 
-export const isUnauthenticated = (e: unknown) => isApiError(e) && e.status === 401
-export const isForbidden = (e: unknown) => isApiError(e) && e.status === 403
-export const isNotFound = (e: unknown) => isApiError(e) && e.status === 404
-export const isValidation = (e: unknown) => isApiError(e) && (e.status === 400 || e.status === 422)
+const hasCode = (e: unknown, ...codes: ApiErrorCode[]): e is ApiError =>
+  isApiError(e) && codes.includes(e.code)
 
-/** The last-seat race (spec §3.3). Expected, not exceptional. */
-export const isSeatConflict = (e: unknown) =>
-  isApiError(e) && e.status === 409 && (e.code === 'SEAT_UNAVAILABLE' || e.code === 'ALREADY_BOOKED')
+/* ── auth ─────────────────────────────────────────────────────────────── */
 
-export const isConflict = (e: unknown) => isApiError(e) && e.status === 409
+/** Access token aged out. Refresh and retry — do NOT bounce the user to login. */
+export const isTokenExpired = (e: unknown): e is ApiError => hasCode(e, 'TOKEN_EXPIRED')
 
-/** Ride is completed or cancelled — terminal, read-only. (spec §3.6) */
-export const isGone = (e: unknown) => isApiError(e) && e.status === 410
+/** Session genuinely gone (revoked, replayed refresh token). Send them to login. */
+export const isUnauthenticated = (e: unknown): e is ApiError =>
+  hasCode(e, 'UNAUTHENTICATED', 'INVALID_CREDENTIALS')
+
+/* ── absence ──────────────────────────────────────────────────────────── */
 
 /**
- * Human-facing copy. 403 and 404 deliberately share a message: distinguishing
- * them turns the UI into an existence oracle for other people's bookings.
+ * Covers "does not exist" AND "not yours" — the backend deliberately conflates
+ * them. Render "no longer available", never "deleted" and never "forbidden".
+ */
+export const isNotFound = (e: unknown): e is ApiError =>
+  isApiError(e) && (e.status === 404 || hasCode(e, 'NOT_FOUND', 'RIDE_NOT_FOUND', 'BOOKING_NOT_FOUND', 'USER_NOT_FOUND'))
+
+/* ── validation ───────────────────────────────────────────────────────── */
+
+export const isValidation = (e: unknown): e is ApiError =>
+  hasCode(e, 'VALIDATION_FAILED', 'MALFORMED_REQUEST')
+
+/* ── state ────────────────────────────────────────────────────────────── */
+
+/** Lost the race for the last seat. Expected on a popular ride. (spec §3.3) */
+export const isSeatUnavailable = (e: unknown): e is ApiError => hasCode(e, 'NO_SEATS_AVAILABLE')
+
+export const isAlreadyBooked = (e: unknown): e is ApiError => hasCode(e, 'ALREADY_BOOKED')
+
+/** Completed ride: locked forever. Render the whole view read-only. (spec §3.6) */
+export const isRideImmutable = (e: unknown): e is ApiError => hasCode(e, 'RIDE_COMPLETED_IMMUTABLE')
+
+/** Cancelled ride. */
+export const isRideNotOpen = (e: unknown): e is ApiError => hasCode(e, 'RIDE_NOT_OPEN')
+
+/** Any terminal-ride state: the view should stop offering mutations. */
+export const isRideTerminalError = (e: unknown): e is ApiError =>
+  hasCode(e, 'RIDE_COMPLETED_IMMUTABLE', 'RIDE_NOT_OPEN')
+
+export const isRateLimited = (e: unknown): e is ApiError => hasCode(e, 'RATE_LIMITED')
+
+/**
+ * User-facing copy, following the table in docs/FRONTEND.md.
+ *
+ * TOKEN_EXPIRED returns null on purpose: the correct response is a silent
+ * refresh, so there is nothing to say to the user.
  */
 export function toUserMessage(e: unknown): string {
   if (!isApiError(e)) return 'Something went wrong. Please try again.'
 
   switch (e.code) {
-    case 'SEAT_UNAVAILABLE':
-      return 'That seat was just taken.'
-    case 'ALREADY_BOOKED':
-      return 'You already have a seat on this ride.'
-    case 'RIDE_COMPLETED':
-      return 'This ride has been completed and can no longer be changed.'
-    case 'RIDE_CANCELLED':
-      return 'This ride was cancelled by the driver.'
-    case 'RIDE_NOT_OPEN':
-      return 'This ride is no longer accepting bookings.'
-    case 'UNAUTHENTICATED':
-      return 'Your session has expired. Please sign in again.'
-    case 'FORBIDDEN':
-    case 'NOT_FOUND':
-      return "We couldn't find that, or you don't have access to it."
     case 'VALIDATION_FAILED':
-      return e.fieldErrors[0]?.message ?? 'Please check the details you entered.'
+    case 'MALFORMED_REQUEST':
+      return e.details[0]?.message ?? 'Please check the details you entered.'
+    case 'INVALID_CREDENTIALS':
+      return 'Email or password is incorrect'
+    case 'EMAIL_ALREADY_REGISTERED':
+      return 'That email already has an account'
+    case 'TOKEN_EXPIRED':
+    case 'UNAUTHENTICATED':
+      return 'Your session has ended. Please sign in again.'
+    case 'FORBIDDEN':
+    case 'NOT_RESOURCE_OWNER':
+    case 'NOT_FOUND':
+    case 'USER_NOT_FOUND':
+      return 'This is no longer available'
+    case 'RIDE_NOT_FOUND':
+      return 'This ride is no longer available'
+    case 'BOOKING_NOT_FOUND':
+      return 'This booking is no longer available'
+    case 'NO_SEATS_AVAILABLE':
+      return 'That seat just went'
+    case 'ALREADY_BOOKED':
+      return 'You already have a seat on this ride'
+    case 'CANNOT_BOOK_OWN_RIDE':
+      return 'This is your ride'
+    case 'RIDE_COMPLETED_IMMUTABLE':
+      return 'This ride has finished'
+    case 'RIDE_NOT_OPEN':
+      return 'This ride was cancelled'
+    case 'CONFLICT':
+      return 'That has already been done'
+    case 'DEPARTURE_IN_PAST':
+      return 'Departure must be in the future'
+    case 'UNPROCESSABLE':
+      return e.message
     case 'RATE_LIMITED':
-      return 'Too many requests. Please wait a moment.'
+      return 'Too many attempts, try shortly'
+    case 'SERVICE_UNAVAILABLE':
+      return 'The service is temporarily unavailable. Please try again.'
     case 'TIMEOUT':
       return 'The request took too long. Please try again.'
     case 'NETWORK':
       return 'Network problem. Check your connection and try again.'
-    case 'INTERNAL':
-      return 'Something went wrong on our side. Please try again.'
+    case 'INTERNAL_ERROR':
+      return 'Something went wrong'
   }
 }
 
-/** Default code for a status when the backend sends no body code. */
+/** Fallback code when the body carries none. */
 export function codeForStatus(status: number): ApiErrorCode {
-  if (status === 400 || status === 422) return 'VALIDATION_FAILED'
+  if (status === 400) return 'VALIDATION_FAILED'
   if (status === 401) return 'UNAUTHENTICATED'
-  if (status === 403) return 'FORBIDDEN'
   if (status === 404) return 'NOT_FOUND'
-  if (status === 409) return 'SEAT_UNAVAILABLE'
-  if (status === 410) return 'RIDE_CANCELLED'
+  if (status === 409) return 'CONFLICT'
+  if (status === 422) return 'UNPROCESSABLE'
   if (status === 429) return 'RATE_LIMITED'
-  return 'INTERNAL'
+  if (status === 503) return 'SERVICE_UNAVAILABLE'
+  return 'INTERNAL_ERROR'
+}
+
+/** Map `details[]` onto form fields: `{ 'seatsTotal': 'A ride must offer…' }`. */
+export function toFieldMessages(e: unknown): Record<string, string> {
+  if (!isApiError(e)) return {}
+  const out: Record<string, string> = {}
+  for (const detail of e.details) {
+    out[detail.field] ??= detail.message
+  }
+  return out
 }
