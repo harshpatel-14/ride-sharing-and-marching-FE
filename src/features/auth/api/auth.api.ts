@@ -1,26 +1,26 @@
-import { api, endpoints } from '@/lib/api'
-import { sessionSchema, type LoginInput, type RegisterInput, type Session } from '../schemas'
+import { request } from '@/lib/api'
+import { meResponseSchema, userSchema, type LoginInput, type RegisterInput, type User } from '../schemas'
 
 /**
- * Auth calls go through Next's BFF route handlers, not straight to Express —
- * the route handler is what sets the httpOnly cookie the browser can't read. (§4)
+ * Client-side auth calls.
+ *
+ * These target Next's own BFF routes (`/api/auth/*`), not Express. The BFF is
+ * what sets the httpOnly cookies, so no token ever reaches this code — the
+ * responses carry only the user. (§4)
  */
-const BFF = '/api/auth'
+const bff = <T>(method: 'GET' | 'POST', path: string, body?: unknown) =>
+  request<T>(method, path, { ...(body !== undefined ? { body } : {}), options: { baseUrl: '/api/auth' } })
 
 export const authApi = {
-  login: async (input: LoginInput): Promise<Session> =>
-    sessionSchema.parse(await api.post(`${BFF}/login`, input, { baseUrl: '/' })),
+  login: async (input: LoginInput): Promise<User> =>
+    userSchema.parse(((await bff<{ user: unknown }>('POST', '/login', input)).user)),
 
-  register: async (input: RegisterInput): Promise<Session> =>
-    sessionSchema.parse(await api.post(`${BFF}/register`, input, { baseUrl: '/' })),
+  register: async (input: RegisterInput): Promise<User> =>
+    userSchema.parse(((await bff<{ user: unknown }>('POST', '/register', input)).user)),
+
+  me: async (): Promise<User> => meResponseSchema.parse(await bff('GET', '/me')).user,
 
   logout: async (): Promise<void> => {
-    await api.post(`${BFF}/logout`, undefined, { baseUrl: '/' })
+    await bff('POST', '/logout')
   },
-
-  /** Reads the session via the BFF so the browser never handles a token. */
-  me: async (): Promise<Session> =>
-    sessionSchema.parse(await api.get(`${BFF}/me`, { baseUrl: '/' })),
 }
-
-export { endpoints as authEndpoints }
