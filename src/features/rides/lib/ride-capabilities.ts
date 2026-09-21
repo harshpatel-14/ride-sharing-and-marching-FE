@@ -1,17 +1,20 @@
-import type { Session } from '@/features/auth'
 import { isPast } from '@/lib/utils'
-import type { Ride } from '../schemas'
+import { isRideTerminal, type Ride } from '../schemas'
 
 /**
  * What the UI may offer. (§10)
  *
- * This is a RENDERING decision, not enforcement. A completed ride's
- * immutability (spec §3.6) is enforced in Express and in the database; if
- * someone POSTs directly to one they get 410 regardless of what this returns.
+ * A RENDERING decision, not enforcement. A completed ride's immutability
+ * (spec §3.6) is enforced by the API and by a database trigger; a direct POST
+ * to one returns 409 RIDE_COMPLETED_IMMUTABLE regardless of what this says.
  *
- * It exists so that "can this be booked?" has exactly one answer across the
- * result card, the detail page, and the map popup, instead of three
- * conditionals that drift apart.
+ * It exists so "can this be booked?" has exactly one answer across the result
+ * card, the detail page and the map popup, instead of three conditionals that
+ * drift apart.
+ *
+ * Note it reads `ride.isOwner` rather than comparing ids — the backend already
+ * answered that question, and re-deriving it here would be a second
+ * implementation waiting to disagree.
  */
 export interface RideCapabilities {
   canBook: boolean
@@ -19,22 +22,26 @@ export interface RideCapabilities {
   canEdit: boolean
   canComplete: boolean
   canManageBookings: boolean
+  canViewAudit: boolean
 }
 
-export function rideCapabilities(ride: Ride, session: Session | null): RideCapabilities {
-  const isDriver = session !== null && ride.driverId === session.userId
-  const isTerminal = ride.status === 'COMPLETED' || ride.status === 'CANCELLED'
+export function rideCapabilities(ride: Ride): RideCapabilities {
+  const terminal = isRideTerminal(ride)
+  const departed = isPast(ride.departureAt)
 
   return {
-    canBook: !isTerminal && ride.status === 'OPEN' && ride.seatsAvailable > 0 && !isDriver && session !== null,
-    canCancelRide: !isTerminal && isDriver,
-    canEdit: !isTerminal && isDriver,
-    canComplete: isDriver && ride.status !== 'COMPLETED' && ride.status !== 'CANCELLED' && isPast(ride.departureAt),
-    canManageBookings: isDriver,
+    // The API rejects booking your own ride with 422 CANNOT_BOOK_OWN_RIDE, and
+    // excludes departed and full rides from search.
+    canBook: !terminal && !ride.isOwner && ride.seatsAvailable > 0 && !departed,
+    canCancelRide: !terminal && ride.isOwner,
+    canEdit: !terminal && ride.isOwner,
+    canComplete: !terminal && ride.isOwner,
+    canManageBookings: ride.isOwner,
+    // Participants only; the driver always qualifies. A rider's access depends
+    // on having booked, which this object cannot see — the API decides, and a
+    // 404 is handled where the audit trail is rendered.
+    canViewAudit: ride.isOwner,
   }
 }
 
-/** Terminal rides render read-only with an explanation, never a disabled-looking form. */
-export function isRideTerminal(ride: Ride): boolean {
-  return ride.status === 'COMPLETED' || ride.status === 'CANCELLED'
-}
+export { isRideTerminal }
