@@ -1,8 +1,10 @@
 'use client'
 
 import { ArrowRight, CalendarClock, Clock, Wallet } from 'lucide-react'
-import { Button, Card, CardHeader, CardTitle, Spinner } from '@/components/ui'
-import { formatDateTime, formatMoney, formatRelative, formatTimeWindow } from '@/lib/utils'
+import Link from 'next/link'
+import { BookSeatButton } from '@/features/bookings'
+import { Button, Card, CardHeader, CardTitle, Spinner, buttonVariants } from '@/components/ui'
+import { cn, formatDateTime, formatMoney, formatRelative, formatTimeWindow } from '@/lib/utils'
 import { toUserMessage } from '@/lib/api'
 import { rideCapabilities } from '../lib/ride-capabilities'
 import { useRide } from '../hooks/use-ride'
@@ -141,11 +143,18 @@ export function RideDetail({ rideId }: { rideId: string }) {
       )}
 
       {caps.canBook && (
-        <Card className="border-dashed">
-          <p className="text-sm text-fg-muted">
-            Seat booking lands in phase 6, with the last-seat conflict handling it requires.
-          </p>
+        <Card>
+          <BookSeatButton rideId={ride.id} seatsAvailable={ride.seatsAvailable} />
         </Card>
+      )}
+
+      {caps.canManageBookings && (
+        <Link
+          href={`/rides/${ride.id}/manage`}
+          className={cn(buttonVariants({ variant: 'outline' }))}
+        >
+          Manage bookings
+        </Link>
       )}
     </div>
   )
