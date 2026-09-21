@@ -6,8 +6,9 @@ The architecture this implements is in [FRONTEND-ARCHITECTURE.md](./FRONTEND-ARC
 Section references below (§) point there. The product spec is
 [21-ride-sharing-and-matching.md](./21-ride-sharing-and-matching.md).
 
-**Status: phases 1–4 complete** (Foundation, Contract, Auth, Rides), built against the real
-backend contract in [docs/API.md](docs/API.md). Search and booking are phases 5–6.
+**Status: phases 1–6 complete** — foundation, contract, auth, rides, search and booking —
+built against the real backend contract in [docs/API.md](docs/API.md). Phase 7 (hardening:
+Playwright, Sentry, perf budgets, a11y pass) is outstanding.
 
 ---
 
@@ -144,6 +145,41 @@ gets the same rotated pair back instead of asking again. Re-measured: **10/10 re
 *Trade-off:* inside that window a replay gets the cached pair rather than tripping the backend's
 theft detection. Acceptable because the token lives in an httpOnly cookie only this BFF reads.
 *Limit:* the lock is per process — see **Scaling out** below.
+
+## What phases 5 and 6 delivered
+
+**Search.** URL-state search, so a link reproduces the screen exactly — which is also how you
+reproduce a slow query at 10 000 open rides. Results lead with `estimatedShare` (what this
+rider would pay), never `estimatedCost` (the whole ride). Nothing filters or re-sorts
+client-side. The empty state explains that matching needs *both* endpoints near *and* the
+windows to overlap, because "no results" is the most confusing screen here.
+
+**Geocoding** is a swappable adapter. Unset `NEXT_PUBLIC_GEOCODER_URL` and the place picker
+degrades to manual coordinates, which produce the identical wire payload.
+
+**Map** renders from the same array as the list, so the panes cannot disagree. Dynamically
+imported, never server-rendered, and entirely optional.
+
+**Booking** centres on the 409. Losing the last seat gets a recovery dialog — the seat went,
+nothing was charged, here is a similar ride — not an error toast. The seat count is never
+optimistically decremented and no booking POST is ever retried.
+
+**Cancelled bookings stay visible**, with `seatShare` and `amountOwed` shown separately so
+"was quoted 150, then the driver cancelled" stays distinguishable from "paid 150".
+
+### Verified end to end, not just in jsdom
+
+Against a stub implementing docs/API.md, through the real BFF:
+
+| Check | Result |
+|---|---|
+| Two riders race the last seat | exactly one 201, one 409 `NO_SEATS_AVAILABLE` |
+| Contact details after booking | winner sees phone+email; loser's page leaks neither |
+| Full ride in search | drops out |
+| Cost split on cancel | ₹300 → 150/150 → back to 300; quoted share kept, owed → 0.00 |
+| Driver cancels ride | rider's page shows reason, "owe nothing", route forward |
+| Manifest read by a non-driver | 404 |
+| 10 parallel calls on an expired token | 1 refresh, no reuse flagged |
 
 ## Three things to know before you add code
 
