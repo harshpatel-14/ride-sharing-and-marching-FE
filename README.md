@@ -6,7 +6,8 @@ The architecture this implements is in [FRONTEND-ARCHITECTURE.md](./FRONTEND-ARC
 Section references below (§) point there. The product spec is
 [21-ride-sharing-and-matching.md](./21-ride-sharing-and-matching.md).
 
-**Status: phases 1 (Foundation) and 2 (Contract) complete.** Routes land in phases 3–6 (§16).
+**Status: phases 1–4 complete** (Foundation, Contract, Auth, Rides), built against the real
+backend contract in [docs/API.md](docs/API.md). Search and booking are phases 5–6.
 
 ---
 
@@ -70,26 +71,104 @@ NEXT_PUBLIC_ENABLE_MSW=true pnpm dev
 - **47 tests** pinning the invariants: bad-input rejection, contact invisibility,
   409-vs-410 distinction, and capability gating on terminal rides.
 
+## What phase 4 delivered
+
+- **Post a ride** — `RideForm`, React Hook Form + Zod, with a separate form-shaped
+  schema (`rideFormSchema`) that maps to the wire type in exactly one place
+  (`toCreateRideInput`). Rejects past departures, zero/fractional seats and identical
+  origin/destination before any request goes out, and maps backend field errors back
+  onto the right input.
+- **Ride detail** — RSC prefetch to client hydration, then polled while the tab is
+  focused so the seat count stays honest.
+- **My rides** — prefetched list with an empty state.
+- **The completed lock** — a terminal ride renders a read-only explanation and its
+  destructive actions are absent, not disabled.
+- **Contact panel** — renders if and only if the server sent `driverContact`.
+- **Confirmation dialogs** for cancel and complete, both irreversible.
+- **48 new tests** (95 total), including a mutation check: contact visibility,
+  the completed lock and the cancel-ride invalidation were each deliberately broken,
+  and the suite failed in exactly the right places.
+
+### Money is parsed exactly, never through a float
+
+People type rupees; the API takes integer paise. `parseMajorToMinor` splits the string
+rather than multiplying, because `1200.55 * 100` is `120054.99999999999` before
+rounding. That figure feeds a cost split that has to reconcile with an audit trail,
+so being off by a paisa is not cosmetic (§11).
+
+### Phase 3 status
+
+Phase 4 needs a session to exist, so the plumbing is in: `getSession()` /
+`requireSession()` (`@/features/auth/server`), the `(app)` shell that guards every
+route under it, and the BFF `GET /api/auth/me` passthrough. Verified against a stub
+backend: when `/auth/me` fails, `/rides/mine` returns `307 -> /login` and leaks no
+ride data.
+
+**Still outstanding in phase 3:** the login and register forms, the cookie-*setting*
+routes (`/api/auth/login`, `/register`, `/logout`, `/refresh`), and `middleware.ts`.
+`/login` does not exist yet, so that redirect currently lands on a 404.
+
 ---
+
+## Built against the real API
+
+The contract lives in [docs/API.md](docs/API.md) and [docs/FRONTEND.md](docs/FRONTEND.md).
+Five things there shape most of this codebase:
+
+| Backend rule | What it forces here |
+|---|---|
+| Money is a **decimal string** (`"320.00"`) | `lib/utils/money.ts` formats and compares strings; nothing calls `Number()` on an amount |
+| Refresh tokens are **single-use**, and concurrent reuse revokes every session | single-flight lock **plus** a rotation grace cache in `auth.server.ts` |
+| There is **no 403** — not-yours returns `404` | one message for both; the UI is never an existence oracle |
+| `driver.phone` is **absent** until a booking is confirmed | `hasContact()` type guard; no `canViewContact` flag anywhere |
+| `409 NO_SEATS_AVAILABLE` is a **normal** outcome | a recovery path, never a generic error toast |
+
+### Money never becomes a float
+
+`Intl.NumberFormat.format` accepts a decimal string and formats it exactly, so amounts render
+without a `Number()` in the path. `Number("1200.55")` is `1200.5500000000001`, and that figure
+feeds a cost split which has to reconcile with an audit trail to the paisa.
+
+### The refresh trap, and what it took to close it
+
+A refresh token is single-use, and the backend treats a replay as theft — it revokes **every**
+session. A single-flight lock is the obvious fix and it is **not sufficient**. A ten-way
+concurrency test against a stub backend produced **5 refresh calls and a reuse flag**: requests
+arriving just *after* a refresh completed still carried the spent token in their cookie, because
+the rotated cookie had not reached the client yet. That is what parallel browser XHRs do.
+
+The fix is a short grace cache keyed by the token that was spent, so a replay within 30 seconds
+gets the same rotated pair back instead of asking again. Re-measured: **10/10 requests succeed,
+1 refresh call, no reuse flagged**.
+
+*Trade-off:* inside that window a replay gets the cached pair rather than tripping the backend's
+theft detection. Acceptable because the token lives in an httpOnly cookie only this BFF reads.
+*Limit:* the lock is per process — see **Scaling out** below.
 
 ## Three things to know before you add code
 
 **1. The server owns seats, money, and contact details.**
-Never compute a seat count, a cost split, or contact visibility on the client. The UI
-renders what the API returned. `driverContact` is `null` unless the caller holds a
-confirmed booking — there is no `canViewContact` flag to get wrong, and revocation when
-a driver cancels needs no client-side cleanup.
+Never compute a seat count, a cost split, or contact visibility on the client. `driver` simply
+lacks `phone`/`email` unless the caller is the driver or holds a confirmed booking — the backend
+does not fetch those columns otherwise. Use `hasContact(ride.driver)`; there is no
+`canViewContact` flag to get wrong, and revocation on cancellation needs no client-side cleanup.
 
-**2. A 409 on booking is a designed-for outcome, not an error.**
-Two riders tap Book on the last seat; one gets 201, one gets 409. Handle it with a
-recovery path (`isSeatConflict`), never a generic "Something went wrong" toast. And
-never retry a booking POST — a retried non-idempotent write can double-book. If retry
-safety is wanted, it belongs in the API contract as an `Idempotency-Key`, not here.
+**2. `409 NO_SEATS_AVAILABLE` is a designed-for outcome, not an error.**
+Two riders tap Book on the last seat; one gets 201, one gets 409. Handle it with
+`isSeatUnavailable()` and a recovery path, never a generic "Something went wrong". Never retry a
+booking POST — a retried non-idempotent write can claim a second seat. Do not optimistically
+decrement `seatsAvailable`: you cannot know you won.
 
 **3. Import features from their root.**
 `@/features/bookings`, never `@/features/bookings/components/BookingCard`. ESLint
 enforces this. It is what lets a feature's internals be restructured without touching
 the rest of the app.
+
+## Scaling out
+
+The refresh lock and grace cache are **per process**. Two Next instances behind a load balancer
+could still race and trip the backend's reuse detection. Before running more than one instance,
+either move both to a shared store (Redis) or pin refresh to a single sticky route.
 
 ## Layout
 
@@ -101,6 +180,7 @@ src/
 ├── lib/         api · query · geo · auth · env · logger · utils
 ├── config/      site metadata, tunable constants
 ├── mocks/       Fixtures + MSW handlers (used by tests AND dev runtime)
+│                 shaped from the real payloads in docs/API.md
 ├── test/        Vitest setup
 └── types/       Generated API types (do not hand-edit)
 ```
@@ -115,8 +195,25 @@ src/
 | `NEXT_PUBLIC_MAP_STYLE_URL` | browser | Optional until phase 5 |
 | `NEXT_PUBLIC_ENABLE_MSW` | browser | `true` runs the UI with no backend |
 
-## Next: phase 3 (Auth)
+## Corrections to FRONTEND-ARCHITECTURE.md
 
-Login/register, the cookie-setting BFF route handlers under `src/app/api/auth/`,
-`getSession()`, `middleware.ts`, and the authenticated app shell. Done when protected
-routes redirect and a session survives a refresh (§16).
+Found while building against the real contract; worth folding back into the doc:
+
+1. **§2 files `getSession()` under `lib/auth/`, which its own §3 table forbids** — it needs
+   the auth schemas, and `lib` may not import `features`. Session handling now lives in
+   `features/auth/api/auth.server.ts`, and the layering rule stands unweakened.
+2. **Features need a second entry point.** `index.ts` alone cannot serve both Client and Server
+   Components. Each feature may also expose `server.ts` (RSC-only); ESLint allows exactly those
+   two and nothing deeper.
+3. **§11's integer-minor-units advice is wrong for this backend.** The API uses decimal strings.
+   The principle (never a float) survives; the representation changed.
+4. **§6.2's status table needs revising** — this API has no 403 and no 410. Not-yours is 404,
+   and a completed ride is `409 RIDE_COMPLETED_IMMUTABLE`.
+5. **The search contract differs:** metres not kilometres, a 24-hour window cap, ranked top-N
+   with no cursor, and `estimatedShare` is what to display rather than `estimatedCost`.
+
+## Next: phase 5 (Search) and phase 6 (Booking)
+
+`PlaceField` is already shaped in the provider-neutral `Place` vocabulary, so swapping its
+innards for a geocoder autocomplete will not ripple into the ride form. The search and booking
+schemas and API clients are already written against the contract — what remains is their UI.
