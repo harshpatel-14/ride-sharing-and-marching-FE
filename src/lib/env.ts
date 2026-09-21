@@ -8,6 +8,8 @@ import { z } from 'zod'
 const clientSchema = z.object({
   NEXT_PUBLIC_API_URL: z.url(),
   NEXT_PUBLIC_MAP_STYLE_URL: z.url().optional(),
+  /** Optional Nominatim-compatible geocoder. Unset falls back to manual entry. */
+  NEXT_PUBLIC_GEOCODER_URL: z.url().optional(),
   NEXT_PUBLIC_ENABLE_MSW: z
     .enum(['true', 'false'])
     .default('false')
@@ -31,6 +33,7 @@ const serverSchema = z.object({
 const rawClientEnv = {
   NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
   NEXT_PUBLIC_MAP_STYLE_URL: process.env.NEXT_PUBLIC_MAP_STYLE_URL,
+  NEXT_PUBLIC_GEOCODER_URL: process.env.NEXT_PUBLIC_GEOCODER_URL,
   NEXT_PUBLIC_ENABLE_MSW: process.env.NEXT_PUBLIC_ENABLE_MSW,
 }
 
