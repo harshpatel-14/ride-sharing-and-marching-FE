@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll } from 'vitest'
+import { afterAll, afterEach, beforeAll, vi } from 'vitest'
+import './mocks-next'
 import { resetFactories } from '@/mocks/factories'
 import { server } from '@/mocks/server'
 
@@ -10,6 +11,7 @@ beforeAll(() => {
 })
 
 afterEach(() => {
+  vi.clearAllMocks()
   server.resetHandlers()
   cleanup()
   resetFactories()
