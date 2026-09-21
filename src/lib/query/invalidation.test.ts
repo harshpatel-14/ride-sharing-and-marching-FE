@@ -28,7 +28,7 @@ describe('invalidation matrix (§5.2)', () => {
     await invalidateAfter.bookSeat(qc, 'ride-1')
     const calls = invalidated()
     expect(has(calls, queryKeys.rides.detail('ride-1'))).toBe(true)
-    expect(has(calls, queryKeys.rides.costSplit('ride-1'))).toBe(true)
+    expect(has(calls, queryKeys.rides.manifest('ride-1'))).toBe(true)
     expect(has(calls, queryKeys.bookings.mine())).toBe(true)
   })
 
@@ -39,7 +39,7 @@ describe('invalidation matrix (§5.2)', () => {
     const calls = invalidated()
     for (const key of [
       queryKeys.rides.detail('ride-1'),
-      queryKeys.rides.costSplit('ride-1'),
+      queryKeys.rides.manifest('ride-1'),
       queryKeys.search.all,
       queryKeys.bookings.mine(),
     ]) {
